@@ -6,9 +6,19 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use clap::Parser;
 use eggbug::{Attachment, Client, Post};
 use rand::seq::SliceRandom;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+
+const POST_QUEUE_JSON: &str = "post_queue.json";
+
+#[derive(Parser)]
+struct Args {
+    #[clap(long)]
+    refresh_queue: bool,
+}
 
 #[derive(Serialize, Deserialize)]
 struct State {
@@ -37,6 +47,29 @@ impl State {
             already_posted: Vec::new(),
         }
     }
+
+    fn refresh_queue(&mut self) {
+        let to_sort = fs::read_dir("cats/").unwrap().map(|image| {
+            image
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+                .into()
+        });
+
+        let to_insert: Vec<_> = to_sort
+            .filter(|post| !(self.to_post.contains(post) || self.already_posted.contains(post)))
+            .collect();
+
+        let mut rng = rand::thread_rng();
+
+        for post in to_insert {
+            let index = rng.gen_range(0..=self.to_post.len());
+
+            self.to_post.insert(index, post);
+        }
+    }
 }
 
 fn try_get_alt_text(path: &Path) -> Option<String> {
@@ -55,10 +88,28 @@ fn try_get_alt_text(path: &Path) -> Option<String> {
     }
 }
 
-const POST_QUEUE_JSON: &str = "post_queue.json";
-
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+
+    let mut state = fs::read_to_string(POST_QUEUE_JSON)
+        .map(|s| serde_json::from_str(&s).ok())
+        .ok()
+        .flatten()
+        .unwrap_or_else(State::new);
+
+    println!("[gaycats] post queue read");
+
+    if args.refresh_queue {
+        state.refresh_queue();
+
+        fs::write(POST_QUEUE_JSON, serde_json::to_string(&state).unwrap())
+            .expect("Failed to write back post queue to disk");
+
+        println!("[gaycats] post queue updated");
+        return;
+    }
+
     let email = env::var("COHOST_EMAIL").expect("Could not log on: COHOST_EMAIL not set");
     let password = env::var("COHOST_PASSWORD").expect("Could not log on: COHOST_PASSWORD not set");
     let page = env::var("COHOST_USERNAME").expect("Could not log on: COHOST_USERNAME not set");
@@ -72,14 +123,6 @@ async fn main() {
         .expect("Could not log on: failed to authenticate to cohost");
 
     println!("[gaycats] session authenticated");
-
-    let mut state = fs::read_to_string(POST_QUEUE_JSON)
-        .map(|s| serde_json::from_str(&s).ok())
-        .ok()
-        .flatten()
-        .unwrap_or_else(State::new);
-
-    println!("[gaycats] post queue read");
 
     let image_path = state.to_post.pop_front().unwrap();
 
